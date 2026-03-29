@@ -106,7 +106,13 @@ PROMPT_CONSISTENCY_SET: List[str] = [
 
 
 def _base_safety_cache_path(output_root: str | Path, model_name: str) -> Path:
-    path = config.cache_root(output_root) / config.slugify_model_name(model_name) / "base_safety_metrics.json"
+    filename = (
+        f"base_safety_metrics_h{config.SAFETY_EVAL_HARMFUL_SAMPLES}"
+        f"_j{config.SAFETY_EVAL_JAILBREAK_SAMPLES}"
+        f"_b{config.SAFETY_EVAL_BENIGN_SAMPLES}"
+        f"_t{config.MAX_NEW_TOKENS}.json"
+    )
+    path = config.cache_root(output_root) / config.slugify_model_name(model_name) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -158,24 +164,27 @@ def evaluate_utility(
 
 
 def evaluate_safety(model, tokenizer, device: str) -> Dict[str, object]:
+    harmful_prompts = HARMFUL_EVAL_PROMPTS[: config.SAFETY_EVAL_HARMFUL_SAMPLES]
+    jailbreak_prompts = JAILBREAK_PROMPTS[: config.SAFETY_EVAL_JAILBREAK_SAMPLES]
+    benign_prompts = BENIGN_EVAL_PROMPTS[: config.SAFETY_EVAL_BENIGN_SAMPLES]
     harmful_outputs = generate_responses(
         model,
         tokenizer,
-        HARMFUL_EVAL_PROMPTS,
+        harmful_prompts,
         device,
         desc="Safety eval harmful prompts",
     )
     jailbreak_outputs = generate_responses(
         model,
         tokenizer,
-        JAILBREAK_PROMPTS,
+        jailbreak_prompts,
         device,
         desc="Safety eval jailbreak prompts",
     )
     benign_outputs = generate_responses(
         model,
         tokenizer,
-        BENIGN_EVAL_PROMPTS,
+        benign_prompts,
         device,
         desc="Safety eval benign prompts",
     )

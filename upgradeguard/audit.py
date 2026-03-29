@@ -386,6 +386,8 @@ def compute_parameter_distance_baseline(model_name: str, updated_model) -> float
             if name not in updated_named:
                 continue
             updated_param = updated_named[name]
+            if tuple(updated_param.shape) != tuple(base_param.shape):
+                continue
             delta = updated_param.detach().cpu().float() - base_param.detach().cpu().float()
             running_total += torch.sum(delta * delta)
             matched += 1

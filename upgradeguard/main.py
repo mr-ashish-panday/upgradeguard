@@ -39,7 +39,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=config.LEARNING_RATE)
     parser.add_argument("--epochs", type=int, default=config.EPOCHS)
     parser.add_argument("--seed", type=int, default=config.SEED)
+    parser.add_argument("--max-new-tokens", type=int, default=config.MAX_NEW_TOKENS)
+    parser.add_argument("--max-input-tokens", type=int, default=config.MAX_INPUT_TOKENS)
+    parser.add_argument("--max-sequence-tokens", type=int, default=config.MAX_SEQUENCE_TOKENS)
+    parser.add_argument("--generation-batch-size", type=int, default=config.GENERATION_BATCH_SIZE)
+    parser.add_argument("--harmful-eval-samples", type=int, default=config.SAFETY_EVAL_HARMFUL_SAMPLES)
+    parser.add_argument("--jailbreak-eval-samples", type=int, default=config.SAFETY_EVAL_JAILBREAK_SAMPLES)
+    parser.add_argument("--benign-eval-samples", type=int, default=config.SAFETY_EVAL_BENIGN_SAMPLES)
     return parser.parse_args()
+
+
+def apply_runtime_overrides(args: argparse.Namespace) -> None:
+    config.MAX_NEW_TOKENS = args.max_new_tokens
+    config.MAX_INPUT_TOKENS = args.max_input_tokens
+    config.MAX_SEQUENCE_TOKENS = args.max_sequence_tokens
+    config.GENERATION_BATCH_SIZE = args.generation_batch_size
+    config.SAFETY_EVAL_HARMFUL_SAMPLES = args.harmful_eval_samples
+    config.SAFETY_EVAL_JAILBREAK_SAMPLES = args.jailbreak_eval_samples
+    config.SAFETY_EVAL_BENIGN_SAMPLES = args.benign_eval_samples
 
 
 def resolve_conditions(args: argparse.Namespace) -> List[Tuple[str, str, str]]:
@@ -266,6 +283,7 @@ def build_correlation_table(output_root: Path) -> pd.DataFrame:
 
 def main() -> None:
     args = parse_args()
+    apply_runtime_overrides(args)
     output_root = Path(args.output_dir)
     conditions = resolve_conditions(args)
 

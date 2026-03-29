@@ -382,14 +382,13 @@ def run_finetune(
 
     training_args = TrainingArguments(
         output_dir=str(_trainer_output_dir(run_path)),
-        overwrite_output_dir=True,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=max(1, 16 // max(1, batch_size)),
         num_train_epochs=epochs,
         learning_rate=learning_rate,
         logging_steps=10,
         save_strategy="no",
-        evaluation_strategy="no",
+        eval_strategy="no",
         report_to=[],
         remove_unused_columns=False,
         seed=seed,
