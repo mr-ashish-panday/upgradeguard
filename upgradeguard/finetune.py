@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
@@ -417,9 +418,20 @@ def run_finetune(
         raise
 
     model_save_dir = run_path / "model_artifacts"
-    model_save_dir.mkdir(parents=True, exist_ok=True)
-    trainer.save_model(str(model_save_dir))
-    tokenizer.save_pretrained(str(model_save_dir))
+    model_artifacts_saved = False
+    model_artifacts_error: str | None = None
+    should_save_model_artifacts = method in {"lora", "qlora"}
+    if should_save_model_artifacts:
+        model_save_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            trainer.save_model(str(model_save_dir))
+            tokenizer.save_pretrained(str(model_save_dir))
+            model_artifacts_saved = True
+        except Exception as exc:
+            model_artifacts_error = str(exc)
+            shutil.rmtree(model_save_dir, ignore_errors=True)
+    else:
+        model_artifacts_error = "Skipped model artifact save for dense-update method to preserve disk space."
 
     metadata = {
         "model_name": model_name,
@@ -434,6 +446,8 @@ def run_finetune(
         "epochs": epochs,
         **_count_parameters(model),
         "train_runtime": train_result.metrics.get("train_runtime") if hasattr(train_result, "metrics") else None,
+        "model_artifacts_saved": model_artifacts_saved,
+        "model_artifacts_error": model_artifacts_error,
     }
     with (run_path / "training_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(to_serializable(metadata), handle, indent=2)
