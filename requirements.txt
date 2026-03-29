@@ -1,0 +1,13 @@
+torch>=2.0
+transformers>=4.40
+peft>=0.10
+bitsandbytes>=0.43
+datasets>=2.18
+evaluate
+rouge_score
+sacrebleu
+accelerate
+pandas
+numpy
+scipy
+tqdm
