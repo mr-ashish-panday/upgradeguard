@@ -15,6 +15,11 @@ from tqdm.auto import tqdm
 
 from upgradeguard import config
 from upgradeguard.audit import compute_audit_bundle, save_json as save_audit_json
+from upgradeguard.benchmarks import (
+    backfill_external_benchmarks_for_saved_runs,
+    build_external_eval_payload,
+    save_json as save_benchmark_json,
+)
 from upgradeguard.evaluate import (
     ensure_base_safety_metrics,
     evaluate_safety,
@@ -23,6 +28,7 @@ from upgradeguard.evaluate import (
 )
 from upgradeguard.finetune import get_torch_device, run_finetune
 from upgradeguard.metrics import compute_safety_regression, to_serializable
+from upgradeguard.posthoc import build_posthoc_artifacts
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,6 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--harmful-eval-samples", type=int, default=config.SAFETY_EVAL_HARMFUL_SAMPLES)
     parser.add_argument("--jailbreak-eval-samples", type=int, default=config.SAFETY_EVAL_JAILBREAK_SAMPLES)
     parser.add_argument("--benign-eval-samples", type=int, default=config.SAFETY_EVAL_BENIGN_SAMPLES)
+    parser.add_argument("--run-external-validation", action="store_true", help="Evaluate completed runs on held-out external benchmarks.")
+    parser.add_argument("--backfill-external-validation", action="store_true", help="Backfill external benchmark evals for saved adapter runs.")
+    parser.add_argument("--include-strongreject", action="store_true", help="Also run a StrongREJECT subset during external validation.")
+    parser.add_argument("--harmbench-samples", type=int, default=config.EXTERNAL_HARMBENCH_SAMPLES)
+    parser.add_argument("--xstest-samples", type=int, default=config.EXTERNAL_XSTEST_SAMPLES)
+    parser.add_argument("--strongreject-samples", type=int, default=config.EXTERNAL_STRONGREJECT_SAMPLES)
+    parser.add_argument("--skip-finetune", action="store_true", help="Skip training and only build summaries/post-hoc analyses.")
+    parser.add_argument("--skip-posthoc", action="store_true", help="Skip the post-hoc paper analyses.")
     return parser.parse_args()
 
 
@@ -141,6 +155,19 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
         output_root=output_root,
         device=device,
     )
+    external_eval = None
+    if args.run_external_validation:
+        external_eval = build_external_eval_payload(
+            model_name=model_name,
+            model=model,
+            tokenizer=tokenizer,
+            output_root=output_root,
+            device=device,
+            include_strongreject=args.include_strongreject,
+            harmbench_samples=args.harmbench_samples,
+            xstest_samples=args.xstest_samples,
+            strongreject_samples=args.strongreject_samples,
+        )
 
     audit_vs_baselines = {
         "condition": {"model": model_name, "task": task_name, "method": method},
@@ -149,6 +176,7 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
             **audit_bundle["baselines"],
         },
         "targets": safety_regression,
+        "external_targets": external_eval["regression"] if external_eval else {},
         "base_safety_metrics": base_safety_metrics,
         "updated_safety_metrics": safety["metrics"],
     }
@@ -158,6 +186,8 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
     save_audit_json(run_dir / "audit_scores.json", audit_bundle["audit_scores"])
     save_audit_json(run_dir / "layer_drift.json", audit_bundle["layer_drift"])
     save_audit_json(run_dir / "audit_vs_baselines.json", audit_vs_baselines)
+    if external_eval:
+        save_benchmark_json(run_dir / "external_benchmarks.json", external_eval)
 
     manifest = {
         "model": model_name,
@@ -179,6 +209,7 @@ def _load_json(path: Path) -> Dict[str, object]:
 
 
 def build_summary_table(output_root: Path) -> pd.DataFrame:
+    output_root.mkdir(parents=True, exist_ok=True)
     rows: List[Dict[str, object]] = []
     for run_dir in sorted(output_root.iterdir()):
         if not run_dir.is_dir() or run_dir.name == "cache":
@@ -198,6 +229,8 @@ def build_summary_table(output_root: Path) -> pd.DataFrame:
         manifest = _load_json(manifest_path)
 
         row = {
+            "run_dir_name": run_dir.name,
+            "run_dir": str(run_dir),
             "model": manifest["model"],
             "task": manifest["task"],
             "method": manifest["method"],
@@ -211,6 +244,11 @@ def build_summary_table(output_root: Path) -> pd.DataFrame:
             **baseline["predictors"],
             **baseline["targets"],
         }
+        external_path = run_dir / "external_benchmarks.json"
+        if external_path.exists():
+            external = _load_json(external_path)
+            row.update(external.get("metrics", {}))
+            row.update(external.get("regression", {}))
         rows.append(row)
 
     summary = pd.DataFrame(rows)
@@ -234,6 +272,7 @@ def _safe_correlation(xs: Sequence[float], ys: Sequence[float], fn):
 
 
 def build_correlation_table(output_root: Path) -> pd.DataFrame:
+    output_root.mkdir(parents=True, exist_ok=True)
     records: List[Dict[str, object]] = []
     for run_dir in sorted(output_root.iterdir()):
         if not run_dir.is_dir() or run_dir.name == "cache":
@@ -285,29 +324,44 @@ def main() -> None:
     args = parse_args()
     apply_runtime_overrides(args)
     output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
     conditions = resolve_conditions(args)
 
-    for model_name, task_name, method in tqdm(conditions, desc="UpgradeGuard conditions"):
-        run_dir = run_dir_for(output_root, model_name, task_name, method)
-        try:
-            run_condition(args, model_name, task_name, method)
-        except Exception as exc:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            with (run_dir / "error.json").open("w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "model": model_name,
-                        "task": task_name,
-                        "method": method,
-                        "error": str(exc),
-                    },
-                    handle,
-                    indent=2,
-                )
-            _cleanup_model(None)
+    if not args.skip_finetune:
+        for model_name, task_name, method in tqdm(conditions, desc="UpgradeGuard conditions"):
+            run_dir = run_dir_for(output_root, model_name, task_name, method)
+            try:
+                run_condition(args, model_name, task_name, method)
+            except Exception as exc:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                with (run_dir / "error.json").open("w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "model": model_name,
+                            "task": task_name,
+                            "method": method,
+                            "error": str(exc),
+                        },
+                        handle,
+                        indent=2,
+                    )
+                _cleanup_model(None)
 
-    build_summary_table(output_root)
+    if args.backfill_external_validation:
+        status_rows = backfill_external_benchmarks_for_saved_runs(
+            output_root=output_root,
+            device=args.device,
+            include_strongreject=args.include_strongreject,
+            harmbench_samples=args.harmbench_samples,
+            xstest_samples=args.xstest_samples,
+            strongreject_samples=args.strongreject_samples,
+        )
+        pd.DataFrame(status_rows).to_csv(output_root / "external_backfill_status.csv", index=False)
+
+    summary = build_summary_table(output_root)
     build_correlation_table(output_root)
+    if not args.skip_posthoc:
+        build_posthoc_artifacts(summary, output_root)
 
 
 if __name__ == "__main__":

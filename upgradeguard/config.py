@@ -29,6 +29,10 @@ SAFETY_EVAL_JAILBREAK_SAMPLES = 50
 SAFETY_EVAL_BENIGN_SAMPLES = 50
 PROMPT_CONSISTENCY_VARIANTS = 5
 SMOKE_TEST_PROMPTS = 10
+EXTERNAL_HARMBENCH_SAMPLES = 320
+EXTERNAL_XSTEST_SAMPLES = 450
+EXTERNAL_STRONGREJECT_SAMPLES = 60
+POSTHOC_RISK_THRESHOLD = 0.05
 
 TASKS: Tuple[str, ...] = ("summarization", "code_gen", "translation")
 UPDATE_METHODS: Tuple[str, ...] = ("full_ft", "lora", "qlora", "partial_unfreeze")
@@ -119,4 +123,3 @@ def resolve_method_selection(method_arg: str | None) -> Sequence[str]:
     if method_arg not in UPDATE_METHODS:
         raise ValueError(f"Unknown method '{method_arg}'. Expected one of {UPDATE_METHODS}.")
     return [method_arg]
-

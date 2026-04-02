@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
@@ -177,6 +178,82 @@ def compute_safety_regression(base_metrics: Mapping[str, float], updated_metrics
         "consistency_worsening": consistency_worsening,
         "composite_safety_regression": composite,
     }
+
+
+def compute_external_safety_regression(base_metrics: Mapping[str, float], updated_metrics: Mapping[str, float]) -> Dict[str, float]:
+    harmful_refusal_drop = max(
+        0.0,
+        base_metrics.get("harmbench_harmful_refusal_rate", 0.0) - updated_metrics.get("harmbench_harmful_refusal_rate", 0.0),
+    )
+    xstest_unsafe_refusal_drop = max(
+        0.0,
+        base_metrics.get("xstest_unsafe_refusal_rate", 0.0) - updated_metrics.get("xstest_unsafe_refusal_rate", 0.0),
+    )
+    xstest_safe_overrefusal_increase = max(
+        0.0,
+        updated_metrics.get("xstest_safe_overrefusal_rate", 0.0) - base_metrics.get("xstest_safe_overrefusal_rate", 0.0),
+    )
+    strongreject_refusal_drop = max(
+        0.0,
+        base_metrics.get("strongreject_refusal_rate", 0.0) - updated_metrics.get("strongreject_refusal_rate", 0.0),
+    )
+    components = [
+        harmful_refusal_drop,
+        xstest_unsafe_refusal_drop,
+        xstest_safe_overrefusal_increase,
+    ]
+    if "strongreject_refusal_rate" in base_metrics and "strongreject_refusal_rate" in updated_metrics:
+        components.append(strongreject_refusal_drop)
+    composite = float(np.mean(components)) if components else float("nan")
+    return {
+        "external_harmbench_refusal_drop": harmful_refusal_drop,
+        "external_xstest_unsafe_refusal_drop": xstest_unsafe_refusal_drop,
+        "external_xstest_safe_overrefusal_increase": xstest_safe_overrefusal_increase,
+        "external_strongreject_refusal_drop": strongreject_refusal_drop,
+        "external_composite_safety_regression": composite,
+    }
+
+
+def _normalize_tokens(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _counter_cosine_similarity(left: Counter[str], right: Counter[str]) -> float:
+    if not left or not right:
+        return 0.0
+    shared = set(left).intersection(right)
+    numerator = float(sum(left[token] * right[token] for token in shared))
+    left_norm = math.sqrt(sum(value * value for value in left.values()))
+    right_norm = math.sqrt(sum(value * value for value in right.values()))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)
+
+
+def compute_text_similarity_risk(
+    train_texts: Sequence[str],
+    risk_texts: Sequence[str],
+    max_train_texts: int = 256,
+) -> float:
+    if not train_texts or not risk_texts:
+        return float("nan")
+
+    sampled_train_texts = list(train_texts[:max_train_texts])
+    train_counters = [Counter(_normalize_tokens(text)) for text in sampled_train_texts]
+    risk_counters = [Counter(_normalize_tokens(text)) for text in risk_texts]
+    max_similarities: List[float] = []
+    for train_counter in train_counters:
+        if not train_counter:
+            continue
+        max_similarities.append(
+            max(_counter_cosine_similarity(train_counter, risk_counter) for risk_counter in risk_counters)
+        )
+    if not max_similarities:
+        return float("nan")
+    # Average the top quartile to emphasize task slices most semantically adjacent to risky requests.
+    top_k = max(1, int(math.ceil(len(max_similarities) * 0.25)))
+    strongest = sorted(max_similarities, reverse=True)[:top_k]
+    return float(np.mean(strongest))
 
 
 def flatten_metric_dict(prefix: str, metrics: Mapping[str, float]) -> Dict[str, float]:

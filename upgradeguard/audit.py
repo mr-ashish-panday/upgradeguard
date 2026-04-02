@@ -303,6 +303,19 @@ def compute_smoke_test_refusal_rate(model, tokenizer, device: str) -> float:
     return compute_refusal_rate(responses)
 
 
+def _compute_prompt_level_layer_drift(
+    base_states: Mapping[int, torch.Tensor],
+    updated_states: Mapping[int, torch.Tensor],
+) -> Dict[int, List[float]]:
+    prompt_level: Dict[int, List[float]] = {}
+    for layer_idx in sorted(set(base_states).intersection(updated_states)):
+        base = base_states[layer_idx].float()
+        updated = updated_states[layer_idx].float()
+        cosine = torch.nn.functional.cosine_similarity(base, updated, dim=-1)
+        prompt_level[layer_idx] = (1.0 - cosine).detach().cpu().tolist()
+    return prompt_level
+
+
 def compute_layer_drift_metrics(
     model_name: str,
     model,
@@ -328,6 +341,8 @@ def compute_layer_drift_metrics(
 
     layer_drift_safety = compute_layer_drift(base_cache["safety_states"], updated_safety_states)
     layer_drift_benign = compute_layer_drift(base_cache["benign_states"], updated_benign_states)
+    prompt_layer_drift_safety = _compute_prompt_level_layer_drift(base_cache["safety_states"], updated_safety_states)
+    prompt_layer_drift_benign = _compute_prompt_level_layer_drift(base_cache["benign_states"], updated_benign_states)
     late_layers = sorted(layer_drift_safety)[-4:]
     late_layer_safety_drift = float(sum(layer_drift_safety[idx] for idx in late_layers) / max(1, len(late_layers)))
     late_layer_benign_drift = float(sum(layer_drift_benign[idx] for idx in late_layers) / max(1, len(late_layers)))
@@ -336,6 +351,12 @@ def compute_layer_drift_metrics(
     return {
         "layer_drift_safety": layer_drift_safety,
         "layer_drift_benign": layer_drift_benign,
+        "prompt_layer_drift_safety": prompt_layer_drift_safety,
+        "prompt_layer_drift_benign": prompt_layer_drift_benign,
+        "safety_probe_ids": [item["id"] for item in probes.SAFETY_PROBES],
+        "safety_probe_labels": [item["label"] for item in probes.SAFETY_PROBES],
+        "benign_probe_ids": [item["id"] for item in probes.BENIGN_CONTROL_PROBES],
+        "benign_probe_labels": [item["label"] for item in probes.BENIGN_CONTROL_PROBES],
         "late_layer_safety_drift": late_layer_safety_drift,
         "late_layer_benign_drift": late_layer_benign_drift,
         "safety_specificity": safety_specificity,
@@ -433,6 +454,12 @@ def compute_audit_bundle(
         "layer_drift": {
             "layer_drift_safety": drift_metrics["layer_drift_safety"],
             "layer_drift_benign": drift_metrics["layer_drift_benign"],
+            "prompt_layer_drift_safety": drift_metrics["prompt_layer_drift_safety"],
+            "prompt_layer_drift_benign": drift_metrics["prompt_layer_drift_benign"],
+            "safety_probe_ids": drift_metrics["safety_probe_ids"],
+            "safety_probe_labels": drift_metrics["safety_probe_labels"],
+            "benign_probe_ids": drift_metrics["benign_probe_ids"],
+            "benign_probe_labels": drift_metrics["benign_probe_labels"],
             "late_layer_safety_drift": drift_metrics["late_layer_safety_drift"],
             "late_layer_benign_drift": drift_metrics["late_layer_benign_drift"],
             "safety_specificity": drift_metrics["safety_specificity"],
