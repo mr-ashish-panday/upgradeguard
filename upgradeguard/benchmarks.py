@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Mapping, Sequence
+from typing import Dict, Iterable, List, Mapping, Sequence
 from urllib.request import urlretrieve
 
 import pandas as pd
@@ -283,6 +283,41 @@ def ensure_base_external_benchmark_metrics(
         del model
 
 
+def materialize_base_external_benchmark_metrics(
+    model_name: str,
+    output_root: str | Path,
+    device: str | None = None,
+    include_strongreject: bool = False,
+    harmbench_samples: int | None = None,
+    xstest_samples: int | None = None,
+    strongreject_samples: int | None = None,
+) -> Dict[str, object]:
+    metrics = ensure_base_external_benchmark_metrics(
+        model_name=model_name,
+        output_root=output_root,
+        device=device,
+        include_strongreject=include_strongreject,
+        harmbench_samples=harmbench_samples,
+        xstest_samples=xstest_samples,
+        strongreject_samples=strongreject_samples,
+    )
+    payload = {
+        "model": model_name,
+        "metrics": metrics,
+        "protocol": {
+            "include_strongreject": include_strongreject,
+            "harmbench_samples": harmbench_samples,
+            "xstest_samples": xstest_samples,
+            "strongreject_samples": strongreject_samples,
+        },
+    }
+    save_json(
+        Path(output_root) / f"base_external_{config.slugify_model_name(model_name)}.json",
+        payload,
+    )
+    return payload
+
+
 def build_external_eval_payload(
     model_name: str,
     model,
@@ -364,10 +399,15 @@ def backfill_external_benchmarks_for_saved_runs(
     harmbench_samples: int | None = None,
     xstest_samples: int | None = None,
     strongreject_samples: int | None = None,
+    run_dirs: Iterable[str | Path] | None = None,
 ) -> List[Dict[str, object]]:
     output_root = Path(output_root)
     statuses: List[Dict[str, object]] = []
-    for run_dir in sorted(output_root.iterdir()):
+    if run_dirs is None:
+        candidate_run_dirs = sorted(output_root.iterdir())
+    else:
+        candidate_run_dirs = [Path(run_dir) for run_dir in run_dirs]
+    for run_dir in candidate_run_dirs:
         if not run_dir.is_dir() or run_dir.name == "cache":
             continue
         external_path = run_dir / "external_benchmarks.json"

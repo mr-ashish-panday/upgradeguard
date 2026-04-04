@@ -8,16 +8,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import torch
 from datasets import Dataset, load_dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from torch.utils.data import Dataset as TorchDataset
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
 
 from upgradeguard import config
 from upgradeguard.metrics import to_serializable
@@ -47,6 +38,8 @@ def get_torch_dtype(device: str) -> torch.dtype:
 
 
 def load_tokenizer(model_name: str):
+    from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -301,6 +294,9 @@ def _count_parameters(model) -> Dict[str, int]:
 
 
 def load_training_model(model_name: str, method: str, device: str):
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
     torch_dtype = get_torch_dtype(device)
     common_kwargs = {
         "torch_dtype": torch_dtype,
@@ -370,6 +366,8 @@ def run_finetune(
     seed: int = config.SEED,
     device: str | None = None,
 ) -> Dict[str, Any]:
+    from transformers import Trainer, TrainingArguments, set_seed
+
     run_path = Path(run_dir)
     run_path.mkdir(parents=True, exist_ok=True)
     set_seed(seed)

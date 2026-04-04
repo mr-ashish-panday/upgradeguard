@@ -18,6 +18,7 @@ from upgradeguard.audit import compute_audit_bundle, save_json as save_audit_jso
 from upgradeguard.benchmarks import (
     backfill_external_benchmarks_for_saved_runs,
     build_external_eval_payload,
+    materialize_base_external_benchmark_metrics,
     save_json as save_benchmark_json,
 )
 from upgradeguard.evaluate import (
@@ -54,6 +55,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benign-eval-samples", type=int, default=config.SAFETY_EVAL_BENIGN_SAMPLES)
     parser.add_argument("--run-external-validation", action="store_true", help="Evaluate completed runs on held-out external benchmarks.")
     parser.add_argument("--backfill-external-validation", action="store_true", help="Backfill external benchmark evals for saved adapter runs.")
+    parser.add_argument(
+        "--evaluate-base-external",
+        action="store_true",
+        help="Evaluate and save external benchmark metrics for the selected base model(s).",
+    )
+    parser.add_argument(
+        "--selected-run-dirs",
+        nargs="*",
+        default=None,
+        help="Specific run directories or run directory names to target for external backfill.",
+    )
     parser.add_argument("--include-strongreject", action="store_true", help="Also run a StrongREJECT subset during external validation.")
     parser.add_argument("--harmbench-samples", type=int, default=config.EXTERNAL_HARMBENCH_SAMPLES)
     parser.add_argument("--xstest-samples", type=int, default=config.EXTERNAL_XSTEST_SAMPLES)
@@ -208,6 +220,18 @@ def _load_json(path: Path) -> Dict[str, object]:
         return json.load(handle)
 
 
+def _resolve_selected_run_dirs(output_root: Path, selected_run_dirs: Sequence[str] | None) -> List[Path]:
+    if not selected_run_dirs:
+        return []
+    resolved: List[Path] = []
+    for run_dir in selected_run_dirs:
+        candidate = Path(run_dir)
+        if not candidate.is_absolute():
+            candidate = output_root / run_dir
+        resolved.append(candidate)
+    return resolved
+
+
 def build_summary_table(output_root: Path) -> pd.DataFrame:
     output_root.mkdir(parents=True, exist_ok=True)
     rows: List[Dict[str, object]] = []
@@ -348,6 +372,7 @@ def main() -> None:
                 _cleanup_model(None)
 
     if args.backfill_external_validation:
+        selected_run_dirs = _resolve_selected_run_dirs(output_root, args.selected_run_dirs)
         status_rows = backfill_external_benchmarks_for_saved_runs(
             output_root=output_root,
             device=args.device,
@@ -355,8 +380,24 @@ def main() -> None:
             harmbench_samples=args.harmbench_samples,
             xstest_samples=args.xstest_samples,
             strongreject_samples=args.strongreject_samples,
+            run_dirs=selected_run_dirs or None,
         )
         pd.DataFrame(status_rows).to_csv(output_root / "external_backfill_status.csv", index=False)
+
+    if args.evaluate_base_external:
+        base_rows: List[Dict[str, object]] = []
+        for model_name in config.resolve_model_selection(args.model):
+            payload = materialize_base_external_benchmark_metrics(
+                model_name=model_name,
+                output_root=output_root,
+                device=args.device,
+                include_strongreject=args.include_strongreject,
+                harmbench_samples=args.harmbench_samples,
+                xstest_samples=args.xstest_samples,
+                strongreject_samples=args.strongreject_samples,
+            )
+            base_rows.append({"model": model_name, **payload["metrics"]})
+        pd.DataFrame(base_rows).to_csv(output_root / "base_external_summary.csv", index=False)
 
     summary = build_summary_table(output_root)
     build_correlation_table(output_root)

@@ -33,6 +33,28 @@ EXTERNAL_HARMBENCH_SAMPLES = 320
 EXTERNAL_XSTEST_SAMPLES = 450
 EXTERNAL_STRONGREJECT_SAMPLES = 60
 POSTHOC_RISK_THRESHOLD = 0.05
+PROTOCOL_VERSION = "upgradeguard_v1"
+EXTERNAL_BENCHMARK_SUITE: Tuple[str, ...] = ("harmbench", "xstest", "strongreject")
+CHEAP_BASELINES: Tuple[str, ...] = (
+    "parameter_distance_l2",
+    "benign_kl_divergence",
+    "smoke_test_failure_rate",
+    "task_similarity_risk",
+)
+PRIMARY_RANKING_METRICS: Tuple[str, ...] = (
+    "spearman_rho",
+    "kendall_tau",
+    "pairwise_ordering_accuracy",
+)
+GATING_ESCALATION_BUDGETS: Tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
+PROBE_BUDGETS: Tuple[int, ...] = (10, 25, 50)
+PRIMARY_PLOTS: Tuple[str, ...] = (
+    "audit_vs_external_scatter",
+    "escalation_budget_curve",
+    "budget_scaling_curve",
+    "qwen_translation_method_panel",
+    "llama_transfer_panel",
+)
 
 TASKS: Tuple[str, ...] = ("summarization", "code_gen", "translation")
 UPDATE_METHODS: Tuple[str, ...] = ("full_ft", "lora", "qlora", "partial_unfreeze")

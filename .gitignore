@@ -1,0 +1,5 @@
+pulls/
+results/
+logs/
+**/__pycache__/
+*.pyc
