@@ -3,3 +3,8 @@ results/
 logs/
 **/__pycache__/
 *.pyc
+temp/
+tmp/
+tmp_*/
+*.tgz
+tmp_lightning_setup.ps1

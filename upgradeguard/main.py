@@ -72,6 +72,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strongreject-samples", type=int, default=config.EXTERNAL_STRONGREJECT_SAMPLES)
     parser.add_argument("--skip-finetune", action="store_true", help="Skip training and only build summaries/post-hoc analyses.")
     parser.add_argument("--skip-posthoc", action="store_true", help="Skip the post-hoc paper analyses.")
+    parser.add_argument(
+        "--save-model-artifacts",
+        action="store_true",
+        help="Persist full model artifacts for this run, including dense methods.",
+    )
+    parser.add_argument(
+        "--fail-on-condition-error",
+        action="store_true",
+        help="Exit non-zero as soon as any condition writes an error instead of silently continuing.",
+    )
     return parser.parse_args()
 
 
@@ -126,6 +136,9 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = run_dir_for(output_root, model_name, task_name, method)
     run_dir.mkdir(parents=True, exist_ok=True)
+    error_path = run_dir / "error.json"
+    if error_path.exists():
+        error_path.unlink()
     device = get_torch_device(args.device)
 
     training_bundle = run_finetune(
@@ -140,6 +153,7 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
         epochs=args.epochs,
         seed=args.seed,
         device=device,
+        save_model_artifacts=args.save_model_artifacts,
     )
 
     model = _materialize_eval_model(training_bundle["model"])
@@ -197,6 +211,13 @@ def run_condition(args: argparse.Namespace, model_name: str, task_name: str, met
     save_eval_json(run_dir / "safety_metrics.json", safety["metrics"])
     save_audit_json(run_dir / "audit_scores.json", audit_bundle["audit_scores"])
     save_audit_json(run_dir / "layer_drift.json", audit_bundle["layer_drift"])
+    stronger_baselines = {
+        "random_text_activation_drift": audit_bundle["baselines"].get("random_text_activation_drift"),
+        "late_layer_random_text_drift": audit_bundle["layer_drift"].get("late_layer_random_text_drift"),
+        "parameter_distance_l2": audit_bundle["baselines"].get("parameter_distance_l2"),
+        "weight_spectral_score": audit_bundle["baselines"].get("weight_spectral_score"),
+    }
+    save_audit_json(run_dir / "stronger_baselines.json", stronger_baselines)
     save_audit_json(run_dir / "audit_vs_baselines.json", audit_vs_baselines)
     if external_eval:
         save_benchmark_json(run_dir / "external_benchmarks.json", external_eval)
@@ -251,6 +272,10 @@ def build_summary_table(output_root: Path) -> pd.DataFrame:
         audit = _load_json(audit_path)
         baseline = _load_json(baseline_path)
         manifest = _load_json(manifest_path)
+        stronger_path = run_dir / "stronger_baselines.json"
+        stronger = _load_json(stronger_path) if stronger_path.exists() else {}
+        predictors = dict(baseline["predictors"])
+        predictors.update(stronger)
 
         row = {
             "run_dir_name": run_dir.name,
@@ -265,7 +290,7 @@ def build_summary_table(output_root: Path) -> pd.DataFrame:
             "refusal_consistency": audit["refusal_consistency"],
             "late_layer_safety_drift": audit["late_layer_safety_drift"],
             "safety_specificity": audit["safety_specificity"],
-            **baseline["predictors"],
+            **predictors,
             **baseline["targets"],
         }
         external_path = run_dir / "external_benchmarks.json"
@@ -370,6 +395,10 @@ def main() -> None:
                         indent=2,
                     )
                 _cleanup_model(None)
+                if args.fail_on_condition_error:
+                    raise RuntimeError(
+                        f"Condition failed: {model_name} / {task_name} / {method}: {exc}"
+                    ) from exc
 
     if args.backfill_external_validation:
         selected_run_dirs = _resolve_selected_run_dirs(output_root, args.selected_run_dirs)

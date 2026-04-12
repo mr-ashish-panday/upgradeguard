@@ -73,9 +73,17 @@ def compute_parameter_distance(base_named_params: Mapping[str, torch.Tensor], up
     if not shared_names:
         return float("nan")
     total = torch.tensor(0.0)
+    matched = 0
     for name in shared_names:
-        delta = updated_named_params[name].detach().cpu().float() - base_named_params[name].detach().cpu().float()
+        base_param = base_named_params[name].detach().cpu().float()
+        updated_param = updated_named_params[name].detach().cpu().float()
+        if tuple(base_param.shape) != tuple(updated_param.shape):
+            continue
+        delta = updated_param - base_param
         total += torch.sum(delta * delta)
+        matched += 1
+    if matched == 0:
+        return float("nan")
     return float(torch.sqrt(total).item())
 
 
@@ -307,6 +315,99 @@ def compute_text_similarity_risk(
     top_k = max(1, int(math.ceil(len(max_similarities) * 0.25)))
     strongest = sorted(max_similarities, reverse=True)[:top_k]
     return float(np.mean(strongest))
+
+
+def _reshape_weight_delta(delta: torch.Tensor) -> torch.Tensor | None:
+    if delta.ndim < 2:
+        return None
+    if delta.ndim == 2:
+        return delta
+    return delta.reshape(delta.shape[0], -1)
+
+
+def compute_weight_spectral_score(
+    base_named_params: Mapping[str, torch.Tensor],
+    updated_named_params: Mapping[str, torch.Tensor],
+    max_matrices: int = 24,
+    min_elements: int = 4096,
+) -> float:
+    candidate_deltas: List[tuple[int, torch.Tensor]] = []
+    for name in sorted(set(base_named_params).intersection(updated_named_params)):
+        base_param = base_named_params[name].detach().cpu().float()
+        updated_param = updated_named_params[name].detach().cpu().float()
+        if tuple(base_param.shape) != tuple(updated_param.shape):
+            continue
+        delta = _reshape_weight_delta(updated_param - base_param)
+        if delta is None or delta.numel() < min_elements:
+            continue
+        candidate_deltas.append((int(delta.numel()), delta))
+
+    if not candidate_deltas:
+        return float("nan")
+
+    candidate_deltas.sort(key=lambda item: item[0], reverse=True)
+    concentration_scores: List[float] = []
+    for _, delta in candidate_deltas[:max_matrices]:
+        try:
+            singular_values = torch.linalg.svdvals(delta)
+            if singular_values.numel() == 0:
+                continue
+            top_singular = float(singular_values[0].item())
+        except Exception:
+            top_singular = float(torch.linalg.matrix_norm(delta, ord=2).item())
+        fro_norm = float(torch.linalg.norm(delta).item())
+        if fro_norm <= 1e-12:
+            continue
+        concentration_scores.append(top_singular / fro_norm)
+
+    if not concentration_scores:
+        return float("nan")
+    return float(np.mean(concentration_scores))
+
+
+def compute_delta_weight_metrics(
+    delta_matrices: Iterable[torch.Tensor],
+    max_matrices: int = 24,
+    min_elements: int = 4096,
+) -> Dict[str, float]:
+    candidate_deltas: List[tuple[int, torch.Tensor]] = []
+    total = torch.tensor(0.0)
+    matched = 0
+    for delta in delta_matrices:
+        delta = delta.detach().cpu().float()
+        total += torch.sum(delta * delta)
+        matched += 1
+        reshaped = _reshape_weight_delta(delta)
+        if reshaped is None or reshaped.numel() < min_elements:
+            continue
+        candidate_deltas.append((int(reshaped.numel()), reshaped))
+
+    parameter_distance = float(torch.sqrt(total).item()) if matched > 0 else float("nan")
+    if not candidate_deltas:
+        return {
+            "parameter_distance_l2": parameter_distance,
+            "weight_spectral_score": float("nan"),
+        }
+
+    candidate_deltas.sort(key=lambda item: item[0], reverse=True)
+    concentration_scores: List[float] = []
+    for _, delta in candidate_deltas[:max_matrices]:
+        try:
+            singular_values = torch.linalg.svdvals(delta)
+            if singular_values.numel() == 0:
+                continue
+            top_singular = float(singular_values[0].item())
+        except Exception:
+            top_singular = float(torch.linalg.matrix_norm(delta, ord=2).item())
+        fro_norm = float(torch.linalg.norm(delta).item())
+        if fro_norm <= 1e-12:
+            continue
+        concentration_scores.append(top_singular / fro_norm)
+
+    return {
+        "parameter_distance_l2": parameter_distance,
+        "weight_spectral_score": float(np.mean(concentration_scores)) if concentration_scores else float("nan"),
+    }
 
 
 def flatten_metric_dict(prefix: str, metrics: Mapping[str, float]) -> Dict[str, float]:

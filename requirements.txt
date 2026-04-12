@@ -4,6 +4,8 @@ huggingface-hub>=0.30,<1.0
 peft>=0.10
 bitsandbytes>=0.43
 datasets>=2.18
+protobuf
+sentencepiece
 evaluate
 rouge_score
 sacrebleu

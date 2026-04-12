@@ -24,6 +24,115 @@ REQUIRED_FILES = (
 )
 
 
+def _training_signature(training: Dict[str, object]) -> str:
+    return "|".join(
+        [
+            f"bs={training.get('batch_size', 'na')}",
+            f"lr={training.get('learning_rate', 'na')}",
+            f"ep={training.get('epochs', 'na')}",
+            f"seed={training.get('seed', 'na')}",
+        ]
+    )
+
+
+def _infer_run_variant(method: str, run_dir: Path) -> str:
+    run_dir_text = str(run_dir).lower()
+    if "optimized" in run_dir_text:
+        return "optimized"
+    if method == "full_ft":
+        return "standard"
+    return "standard"
+
+
+def discover_enriched_summaries(roots: Sequence[str]) -> List[Path]:
+    candidates: List[Path] = []
+    seen: set[str] = set()
+    search_roots = [REPO_ROOT / "results", *(Path(root) for root in roots)]
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for summary_path in root.rglob("summary_table_enriched.csv"):
+            key = str(summary_path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(summary_path)
+    return sorted(candidates)
+
+
+def attach_existing_task_similarity(summary: pd.DataFrame, roots: Sequence[str]) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+
+    enriched_sources: List[pd.DataFrame] = []
+    required = {"task_similarity_risk", "model", "task"}
+    for summary_path in discover_enriched_summaries(roots):
+        try:
+            source = pd.read_csv(summary_path)
+        except Exception:
+            continue
+        if not required.issubset(source.columns):
+            continue
+        keep_columns = [
+            column
+            for column in (
+                "run_dir",
+                "run_dir_name",
+                "model",
+                "task",
+                "method",
+                "run_variant",
+                "training_signature",
+                "task_similarity_risk",
+            )
+            if column in source.columns
+        ]
+        if "task_similarity_risk" not in keep_columns:
+            continue
+        trimmed = source[keep_columns].dropna(subset=["task_similarity_risk"]).copy()
+        if trimmed.empty:
+            continue
+        enriched_sources.append(trimmed)
+
+    if not enriched_sources:
+        return summary
+
+    enriched = summary.copy()
+    if "task_similarity_risk" not in enriched.columns:
+        enriched["task_similarity_risk"] = pd.NA
+
+    lookup = pd.concat(enriched_sources, ignore_index=True)
+
+    def _merge_fill(target: pd.DataFrame, keys: List[str], fill_column: str) -> pd.DataFrame:
+        usable = [key for key in keys if key in target.columns and key in lookup.columns]
+        if not usable:
+            return target
+        candidates = (
+            lookup.dropna(subset=usable + ["task_similarity_risk"])
+            .drop_duplicates(subset=usable, keep="first")[usable + ["task_similarity_risk"]]
+            .rename(columns={"task_similarity_risk": fill_column})
+        )
+        merged = target.merge(candidates, on=usable, how="left")
+        merged["task_similarity_risk"] = merged["task_similarity_risk"].fillna(merged[fill_column])
+        return merged.drop(columns=[fill_column])
+
+    for keys in (
+        ["run_dir"],
+        ["run_dir_name"],
+        ["model", "task", "method", "run_variant", "training_signature"],
+        ["model", "task", "method", "run_variant"],
+        ["model", "task", "method"],
+        ["model", "task"],
+        ["task"],
+    ):
+        fill_column = "__task_similarity_fill__"
+        enriched = _merge_fill(enriched, keys, fill_column)
+        if enriched["task_similarity_risk"].notna().all():
+            break
+
+    return enriched
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a master UpgradeGuard results sheet from multiple roots.")
     parser.add_argument(
@@ -78,6 +187,17 @@ def build_summary_from_run_dirs(run_dirs: Iterable[Path]) -> pd.DataFrame:
         audit = _load_json(run_dir / "audit_scores.json")
         baseline = _load_json(run_dir / "audit_vs_baselines.json")
         manifest = _load_json(run_dir / "run_manifest.json")
+        stronger_path = run_dir / "stronger_baselines.json"
+        stronger = _load_json(stronger_path) if stronger_path.exists() else {}
+        predictors = dict(baseline.get("predictors", {}))
+        predictors.update(stronger)
+        training = dict(manifest.get("training", {}))
+        run_variant = _infer_run_variant(str(manifest["method"]), run_dir)
+        update_label = (
+            f"{manifest['method']}_{run_variant}"
+            if run_variant not in {"", "standard"}
+            else str(manifest["method"])
+        )
 
         row = {
             "run_dir_name": run_dir.name,
@@ -85,14 +205,17 @@ def build_summary_from_run_dirs(run_dirs: Iterable[Path]) -> pd.DataFrame:
             "model": manifest["model"],
             "task": manifest["task"],
             "method": manifest["method"],
+            "run_variant": run_variant,
+            "update_label": update_label,
+            "training_signature": _training_signature(training),
+            "train_batch_size": training.get("batch_size"),
+            "train_learning_rate": training.get("learning_rate"),
+            "train_epochs": training.get("epochs"),
+            "train_seed": training.get("seed"),
             **utility,
             **safety,
-            "audit_score": audit["audit_score"],
-            "canary_refusal_rate": audit["canary_refusal_rate"],
-            "refusal_consistency": audit["refusal_consistency"],
-            "late_layer_safety_drift": audit["late_layer_safety_drift"],
-            "safety_specificity": audit["safety_specificity"],
-            **baseline.get("predictors", {}),
+            **{key: value for key, value in audit.items() if key != "raw_canary_outputs"},
+            **predictors,
             **baseline.get("targets", {}),
         }
 
@@ -117,7 +240,8 @@ def main() -> None:
     inventory.to_csv(output_dir / "run_inventory.csv", index=False)
 
     summary = build_summary_from_run_dirs(run_dirs)
-    summary.to_csv(output_dir / "summary_table.csv", index=False)
+    summary = attach_existing_task_similarity(summary, args.roots)
+    summary.to_csv(output_dir / "summary_table_raw.csv", index=False)
     build_posthoc_artifacts(summary, output_dir)
 
 

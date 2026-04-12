@@ -21,8 +21,10 @@ from upgradeguard.metrics import (
     compute_grouped_refusal_consistency,
     compute_kl_divergence,
     compute_layer_drift,
+    compute_parameter_distance,
     compute_refusal_rate,
     compute_safety_specificity,
+    compute_weight_spectral_score,
     to_serializable,
 )
 
@@ -70,11 +72,13 @@ def generate_responses(
     device: str,
     desc: str,
     batch_size: int = config.GENERATION_BATCH_SIZE,
+    generation_kwargs: Mapping[str, object] | None = None,
 ) -> List[str]:
     old_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     rendered_prompts = [apply_instruction_template(tokenizer, prompt) for prompt in prompts]
     responses: List[str] = []
+    generation_kwargs = dict(generation_kwargs or {})
     try:
         for batch_prompts in tqdm(list(_chunk_list(rendered_prompts, batch_size)), desc=desc):
             encoded = tokenizer(
@@ -86,12 +90,16 @@ def generate_responses(
             )
             encoded = {key: value.to(device) for key, value in encoded.items()}
             try:
-                generated = model.generate(
+                generate_args = {
                     **encoded,
-                    max_new_tokens=config.MAX_NEW_TOKENS,
-                    do_sample=False,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
+                    "max_new_tokens": config.MAX_NEW_TOKENS,
+                    "do_sample": False,
+                    "pad_token_id": tokenizer.pad_token_id,
+                    "eos_token_id": tokenizer.eos_token_id,
+                }
+                generate_args.update(generation_kwargs)
+                generated = model.generate(
+                    **generate_args,
                 )
             except RuntimeError as exc:
                 if "out of memory" in str(exc).lower():
@@ -216,6 +224,13 @@ def ensure_base_hidden_state_cache(model_name: str, output_root: str | Path, dev
                 resolved_device,
                 desc=f"Base benign probes ({config.slugify_model_name(model_name)})",
             ),
+            "random_text_states": collect_hidden_states(
+                base_model,
+                tokenizer,
+                probes.random_text_monitor_prompts(),
+                resolved_device,
+                desc=f"Base random-text monitor ({config.slugify_model_name(model_name)})",
+            ),
         }
         torch.save(cache, cache_path)
         return cache
@@ -338,27 +353,40 @@ def compute_layer_drift_metrics(
         device,
         desc="Updated benign probes",
     )
+    updated_random_states = collect_hidden_states(
+        model,
+        tokenizer,
+        probes.random_text_monitor_prompts(),
+        device,
+        desc="Updated random-text monitor",
+    )
 
     layer_drift_safety = compute_layer_drift(base_cache["safety_states"], updated_safety_states)
     layer_drift_benign = compute_layer_drift(base_cache["benign_states"], updated_benign_states)
+    layer_drift_random = compute_layer_drift(base_cache["random_text_states"], updated_random_states)
     prompt_layer_drift_safety = _compute_prompt_level_layer_drift(base_cache["safety_states"], updated_safety_states)
     prompt_layer_drift_benign = _compute_prompt_level_layer_drift(base_cache["benign_states"], updated_benign_states)
+    prompt_layer_drift_random = _compute_prompt_level_layer_drift(base_cache["random_text_states"], updated_random_states)
     late_layers = sorted(layer_drift_safety)[-4:]
     late_layer_safety_drift = float(sum(layer_drift_safety[idx] for idx in late_layers) / max(1, len(late_layers)))
     late_layer_benign_drift = float(sum(layer_drift_benign[idx] for idx in late_layers) / max(1, len(late_layers)))
+    late_layer_random_text_drift = float(sum(layer_drift_random[idx] for idx in late_layers) / max(1, len(late_layers)))
     safety_specificity = compute_safety_specificity(late_layer_safety_drift, late_layer_benign_drift)
 
     return {
         "layer_drift_safety": layer_drift_safety,
         "layer_drift_benign": layer_drift_benign,
+        "layer_drift_random": layer_drift_random,
         "prompt_layer_drift_safety": prompt_layer_drift_safety,
         "prompt_layer_drift_benign": prompt_layer_drift_benign,
+        "prompt_layer_drift_random": prompt_layer_drift_random,
         "safety_probe_ids": [item["id"] for item in probes.SAFETY_PROBES],
         "safety_probe_labels": [item["label"] for item in probes.SAFETY_PROBES],
         "benign_probe_ids": [item["id"] for item in probes.BENIGN_CONTROL_PROBES],
         "benign_probe_labels": [item["label"] for item in probes.BENIGN_CONTROL_PROBES],
         "late_layer_safety_drift": late_layer_safety_drift,
         "late_layer_benign_drift": late_layer_benign_drift,
+        "late_layer_random_text_drift": late_layer_random_text_drift,
         "safety_specificity": safety_specificity,
     }
 
@@ -390,12 +418,21 @@ def compute_benign_kl_baseline(
 
 
 def compute_parameter_distance_baseline(model_name: str, updated_model) -> float:
-    updated_named = dict(updated_model.named_parameters())
+    monitor_model = updated_model
+    if hasattr(updated_model, "merge_and_unload"):
+        try:
+            monitor_model = updated_model.merge_and_unload(progressbar=False)
+        except TypeError:
+            monitor_model = updated_model.merge_and_unload()
+        except Exception:
+            monitor_model = updated_model
+    updated_named = dict(monitor_model.named_parameters())
     try:
         base_model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             low_cpu_mem_usage=True,
+            local_files_only=True,
         )
     except Exception:
         return float("nan")
@@ -419,6 +456,39 @@ def compute_parameter_distance_baseline(model_name: str, updated_model) -> float
         del base_model
 
 
+def compute_weight_monitor_baselines(model_name: str, updated_model) -> Dict[str, float]:
+    monitor_model = updated_model
+    if hasattr(updated_model, "merge_and_unload"):
+        try:
+            monitor_model = updated_model.merge_and_unload(progressbar=False)
+        except TypeError:
+            monitor_model = updated_model.merge_and_unload()
+        except Exception:
+            monitor_model = updated_model
+    updated_named = dict(monitor_model.named_parameters())
+    try:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            low_cpu_mem_usage=True,
+            local_files_only=True,
+        )
+    except Exception:
+        return {
+            "parameter_distance_l2": float("nan"),
+            "weight_spectral_score": float("nan"),
+        }
+
+    try:
+        base_named = dict(base_model.named_parameters())
+        return {
+            "parameter_distance_l2": compute_parameter_distance(base_named, updated_named),
+            "weight_spectral_score": compute_weight_spectral_score(base_named, updated_named),
+        }
+    finally:
+        del base_model
+
+
 def compute_audit_bundle(
     model_name: str,
     task_name: str,
@@ -437,7 +507,6 @@ def compute_audit_bundle(
         safety_specificity=drift_metrics["safety_specificity"],
     )
     baselines = {
-        "parameter_distance_l2": compute_parameter_distance_baseline(model_name, model),
         "benign_kl_divergence": compute_benign_kl_baseline(
             model_name=model_name,
             task_name=task_name,
@@ -448,20 +517,25 @@ def compute_audit_bundle(
             device=device,
         ),
         "smoke_test_refusal_rate": compute_smoke_test_refusal_rate(model, tokenizer, device),
+        "random_text_activation_drift": drift_metrics["late_layer_random_text_drift"],
     }
+    baselines.update(compute_weight_monitor_baselines(model_name, model))
     return {
         "audit_scores": {**audit_components, **canary_scores, "baselines": baselines},
         "layer_drift": {
             "layer_drift_safety": drift_metrics["layer_drift_safety"],
             "layer_drift_benign": drift_metrics["layer_drift_benign"],
+            "layer_drift_random": drift_metrics["layer_drift_random"],
             "prompt_layer_drift_safety": drift_metrics["prompt_layer_drift_safety"],
             "prompt_layer_drift_benign": drift_metrics["prompt_layer_drift_benign"],
+            "prompt_layer_drift_random": drift_metrics["prompt_layer_drift_random"],
             "safety_probe_ids": drift_metrics["safety_probe_ids"],
             "safety_probe_labels": drift_metrics["safety_probe_labels"],
             "benign_probe_ids": drift_metrics["benign_probe_ids"],
             "benign_probe_labels": drift_metrics["benign_probe_labels"],
             "late_layer_safety_drift": drift_metrics["late_layer_safety_drift"],
             "late_layer_benign_drift": drift_metrics["late_layer_benign_drift"],
+            "late_layer_random_text_drift": drift_metrics["late_layer_random_text_drift"],
             "safety_specificity": drift_metrics["safety_specificity"],
         },
         "baselines": baselines,

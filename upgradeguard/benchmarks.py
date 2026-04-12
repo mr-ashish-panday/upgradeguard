@@ -160,13 +160,21 @@ def _load_base_model(model_name: str, device: str):
     return model
 
 
-def _evaluate_prompt_bank(model, tokenizer, records: Sequence[Mapping[str, object]], device: str, desc: str) -> List[Dict[str, object]]:
+def _evaluate_prompt_bank(
+    model,
+    tokenizer,
+    records: Sequence[Mapping[str, object]],
+    device: str,
+    desc: str,
+    generation_kwargs: Mapping[str, object] | None = None,
+) -> List[Dict[str, object]]:
     outputs = generate_responses(
         model,
         tokenizer,
         [str(record["prompt"]) for record in records],
         device,
         desc=desc,
+        generation_kwargs=generation_kwargs,
     )
     return [
         {
@@ -187,6 +195,7 @@ def evaluate_external_benchmarks(
     harmbench_samples: int | None = None,
     xstest_samples: int | None = None,
     strongreject_samples: int | None = None,
+    generation_kwargs: Mapping[str, object] | None = None,
 ) -> Dict[str, object]:
     harmbench_records = load_harmbench_records(output_root, split="test", limit=harmbench_samples)
     xstest_records = load_xstest_records(output_root, limit=xstest_samples)
@@ -196,10 +205,31 @@ def evaluate_external_benchmarks(
         else []
     )
 
-    harmbench_outputs = _evaluate_prompt_bank(model, tokenizer, harmbench_records, device, desc="External eval HarmBench")
-    xstest_outputs = _evaluate_prompt_bank(model, tokenizer, xstest_records, device, desc="External eval XSTest")
+    harmbench_outputs = _evaluate_prompt_bank(
+        model,
+        tokenizer,
+        harmbench_records,
+        device,
+        desc="External eval HarmBench",
+        generation_kwargs=generation_kwargs,
+    )
+    xstest_outputs = _evaluate_prompt_bank(
+        model,
+        tokenizer,
+        xstest_records,
+        device,
+        desc="External eval XSTest",
+        generation_kwargs=generation_kwargs,
+    )
     strongreject_outputs = (
-        _evaluate_prompt_bank(model, tokenizer, strongreject_records, device, desc="External eval StrongREJECT")
+        _evaluate_prompt_bank(
+            model,
+            tokenizer,
+            strongreject_records,
+            device,
+            desc="External eval StrongREJECT",
+            generation_kwargs=generation_kwargs,
+        )
         if strongreject_records
         else []
     )
@@ -328,6 +358,7 @@ def build_external_eval_payload(
     harmbench_samples: int | None = None,
     xstest_samples: int | None = None,
     strongreject_samples: int | None = None,
+    generation_kwargs: Mapping[str, object] | None = None,
 ) -> Dict[str, object]:
     updated = evaluate_external_benchmarks(
         model=model,
@@ -338,6 +369,7 @@ def build_external_eval_payload(
         harmbench_samples=harmbench_samples,
         xstest_samples=xstest_samples,
         strongreject_samples=strongreject_samples,
+        generation_kwargs=generation_kwargs,
     )
     base_metrics = ensure_base_external_benchmark_metrics(
         model_name=model_name,
@@ -368,8 +400,22 @@ def load_saved_run_model(run_dir: str | Path, device: str | None = None):
         manifest = json.load(handle)
 
     resolved_device = get_torch_device(device)
-    tokenizer_source = str(model_dir if (model_dir / "tokenizer_config.json").exists() else manifest["model"])
-    tokenizer = load_tokenizer(tokenizer_source)
+    tokenizer = None
+    tokenizer_candidates = []
+    if (model_dir / "tokenizer_config.json").exists():
+        tokenizer_candidates.append(str(model_dir))
+    tokenizer_candidates.append(str(manifest["model"]))
+    tokenizer_error: Exception | None = None
+    for tokenizer_source in tokenizer_candidates:
+        try:
+            tokenizer = load_tokenizer(tokenizer_source)
+            break
+        except Exception as exc:
+            tokenizer_error = exc
+    if tokenizer is None:
+        raise RuntimeError(
+            f"Unable to load tokenizer for saved run {run_path} from adapter dir or base model."
+        ) from tokenizer_error
 
     try:
         model = AutoPeftModelForCausalLM.from_pretrained(

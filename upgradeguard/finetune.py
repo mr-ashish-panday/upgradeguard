@@ -282,6 +282,30 @@ def _configure_partial_unfreeze(model) -> None:
             param.requires_grad = True
 
 
+def _enable_gradient_flow_for_frozen_prefix(model) -> None:
+    """Ensure checkpointed blocks still receive grad-enabled activations.
+
+    When only late transformer layers are trainable, gradient checkpointing can
+    silently skip gradient construction unless the embedding outputs require
+    grad. This helper mirrors the standard PEFT workaround.
+    """
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+        return
+
+    if not hasattr(model, "get_input_embeddings"):
+        return
+    input_embeddings = model.get_input_embeddings()
+    if input_embeddings is None:
+        return
+
+    def _make_output_require_grad(_module, _inputs, output):
+        if isinstance(output, torch.Tensor):
+            output.requires_grad_(True)
+
+    input_embeddings.register_forward_hook(_make_output_require_grad)
+
+
 def _count_parameters(model) -> Dict[str, int]:
     total = 0
     trainable = 0
@@ -315,14 +339,21 @@ def load_training_model(model_name: str, method: str, device: str):
     if method != "qlora" and hasattr(model, "to"):
         model.to(device)
     model.config.use_cache = False
-    if hasattr(model, "gradient_checkpointing_enable"):
+
+    use_gradient_checkpointing = method != "partial_unfreeze"
+    if use_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
+    elif not use_gradient_checkpointing and hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
 
     if method == "full_ft":
         for param in model.parameters():
             param.requires_grad = True
     elif method == "partial_unfreeze":
         _configure_partial_unfreeze(model)
+        # Partial-unfreeze already fits comfortably on 80GB H100s, so prefer a
+        # simpler non-checkpointed path over fragile frozen-prefix checkpointing.
+        _enable_gradient_flow_for_frozen_prefix(model)
     elif method in {"lora", "qlora"}:
         if method == "qlora":
             model = prepare_model_for_kbit_training(model)
@@ -365,6 +396,7 @@ def run_finetune(
     epochs: int = config.EPOCHS,
     seed: int = config.SEED,
     device: str | None = None,
+    save_model_artifacts: bool = False,
 ) -> Dict[str, Any]:
     from transformers import Trainer, TrainingArguments, set_seed
 
@@ -418,7 +450,7 @@ def run_finetune(
     model_save_dir = run_path / "model_artifacts"
     model_artifacts_saved = False
     model_artifacts_error: str | None = None
-    should_save_model_artifacts = method in {"lora", "qlora"}
+    should_save_model_artifacts = save_model_artifacts or method in {"lora", "qlora"}
     if should_save_model_artifacts:
         model_save_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -429,7 +461,9 @@ def run_finetune(
             model_artifacts_error = str(exc)
             shutil.rmtree(model_save_dir, ignore_errors=True)
     else:
-        model_artifacts_error = "Skipped model artifact save for dense-update method to preserve disk space."
+        model_artifacts_error = (
+            "Skipped model artifact save because save_model_artifacts was disabled for this run."
+        )
 
     metadata = {
         "model_name": model_name,
@@ -442,6 +476,7 @@ def run_finetune(
         "batch_size": batch_size,
         "learning_rate": learning_rate,
         "epochs": epochs,
+        "save_model_artifacts_requested": save_model_artifacts,
         **_count_parameters(model),
         "train_runtime": train_result.metrics.get("train_runtime") if hasattr(train_result, "metrics") else None,
         "model_artifacts_saved": model_artifacts_saved,

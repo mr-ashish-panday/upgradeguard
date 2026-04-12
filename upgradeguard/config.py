@@ -41,6 +41,10 @@ CHEAP_BASELINES: Tuple[str, ...] = (
     "smoke_test_failure_rate",
     "task_similarity_risk",
 )
+STRONGER_BASELINES: Tuple[str, ...] = (
+    "random_text_activation_drift",
+    "weight_spectral_score",
+)
 PRIMARY_RANKING_METRICS: Tuple[str, ...] = (
     "spearman_rho",
     "kendall_tau",
@@ -54,6 +58,15 @@ PRIMARY_PLOTS: Tuple[str, ...] = (
     "budget_scaling_curve",
     "qwen_translation_method_panel",
     "llama_transfer_panel",
+)
+VISIBLE_CANARY_FAMILIES: Tuple[str, ...] = ("clear_harm", "ambiguous_risky")
+HIDDEN_CANARY_FAMILIES: Tuple[str, ...] = ("pressure", "consistency")
+TOKEN_FORM_DRIFT_VARIANTS: Tuple[str, ...] = (
+    "quoted_request",
+    "xml_wrapped",
+    "bulletized",
+    "delimiter_spaced",
+    "prefixed_instruction",
 )
 
 TASKS: Tuple[str, ...] = ("summarization", "code_gen", "translation")
